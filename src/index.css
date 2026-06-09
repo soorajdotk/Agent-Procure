@@ -1,6 +1,15 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-darkBg: #06050C;
+  --color-panelBg: rgba(15, 14, 28, 0.7);
+  --color-brandPurple: #8B5CF6;
+  --color-brandCyan: #06B6D4;
+  --color-brandPink: #EC4899;
+
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-spin-slow: spin 12s linear infinite;
+}
 
 @layer base {
   body {
@@ -24,7 +33,10 @@
 
 .glass-panel-hover {
   @apply transition-all duration-300 hover:border-brandPurple/40;
-  hover:box-shadow: 0 0 20px rgba(139, 92, 246, 0.2);
+}
+
+.glass-panel-hover:hover {
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.2);
 }
 
 /* Text glow */
