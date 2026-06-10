@@ -1,5 +1,5 @@
 export const PROCUREMENT_STORAGE_ADDRESS = "0x9199dA0FE01E7013c4AB37f228394827f95E1748";
-export const PARSE_WEBSITE_ADDRESS = "0x7A324a2F86AAB0a4fC66428e8eC05129bb445917";
+export const PARSE_WEBSITE_ADDRESS = "0xA461Af31530bD2a1d8B8411F9bF070C29849eC85";
 export const AI_RECOMMENDATION_ADDRESS = "0xE1e16C44A50D2A83d69FA6fd540d3dF3EF0520e7";
 
 export const SOMNIA_TESTNET_CONFIG = {
@@ -188,6 +188,37 @@ export const AI_RECOMMENDATION_ABI = [
 
 export const PARSE_WEBSITE_ABI = [
   {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "uint256", "name": "requestId", "type": "uint256" },
+      { "indexed": false, "internalType": "string", "name": "result", "type": "string" }
+    ],
+    "name": "ParseCompleted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "uint256", "name": "requestId", "type": "uint256" },
+      { "indexed": false, "internalType": "uint8", "name": "status", "type": "uint8" }
+    ],
+    "name": "ParseFailed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "uint256", "name": "requestId", "type": "uint256" },
+      { "indexed": false, "internalType": "string", "name": "url", "type": "string" }
+    ],
+    "name": "ParseRequested",
+    "type": "event"
+  },
+  {
+    "stateMutability": "payable",
+    "type": "receive"
+  },
+  {
     "inputs": [
       { "internalType": "string", "name": "websiteUrl", "type": "string" }
     ],
@@ -199,28 +230,19 @@ export const PARSE_WEBSITE_ABI = [
     "type": "function"
   },
   {
-    "anonymous": false,
-    "inputs": [
-      { "indexed": true, "internalType": "uint256", "name": "requestId", "type": "uint256" },
-      { "indexed": false, "internalType": "string", "name": "result", "type": "string" }
+    "inputs": [],
+    "name": "getRequiredDeposit",
+    "outputs": [
+      { "internalType": "uint256", "name": "", "type": "uint256" }
     ],
-    "name": "ParsingCompleted",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      { "indexed": true, "internalType": "uint256", "name": "requestId", "type": "uint256" },
-      { "indexed": false, "internalType": "string", "name": "url", "type": "string" }
-    ],
-    "name": "ParsingRequested",
-    "type": "event"
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [
       { "internalType": "uint256", "name": "requestId", "type": "uint256" }
     ],
-    "name": "getParsedResult",
+    "name": "getResult",
     "outputs": [
       { "internalType": "string", "name": "", "type": "string" },
       { "internalType": "bool", "name": "", "type": "bool" }
@@ -229,14 +251,10 @@ export const PARSE_WEBSITE_ABI = [
     "type": "function"
   },
   {
-    "inputs": [
-      { "internalType": "uint256", "name": "", "type": "uint256" }
-    ],
-    "name": "parsedResults",
+    "inputs": [],
+    "name": "platform",
     "outputs": [
-      { "internalType": "string", "name": "websiteUrl", "type": "string" },
-      { "internalType": "string", "name": "extractedData", "type": "string" },
-      { "internalType": "bool", "name": "completed", "type": "bool" }
+      { "internalType": "contract IAgentRequester", "name": "", "type": "address" }
     ],
     "stateMutability": "view",
     "type": "function"
@@ -245,9 +263,11 @@ export const PARSE_WEBSITE_ABI = [
     "inputs": [
       { "internalType": "uint256", "name": "", "type": "uint256" }
     ],
-    "name": "pendingRequests",
+    "name": "results",
     "outputs": [
-      { "internalType": "bool", "name": "", "type": "bool" }
+      { "internalType": "string", "name": "url", "type": "string" },
+      { "internalType": "string", "name": "result", "type": "string" },
+      { "internalType": "bool", "name": "completed", "type": "bool" }
     ],
     "stateMutability": "view",
     "type": "function"

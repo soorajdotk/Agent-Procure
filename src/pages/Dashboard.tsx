@@ -71,38 +71,41 @@ export const Dashboard: React.FC = () => {
       const requestCounterVal = await storageContract.requestCounter();
       const totalReqCount = Number(requestCounterVal);
 
-      // We will fetch all request logs to count completed/pending and fetch recent requests
-      // This is extremely performant on Testnet.
+      // Somnia testnet RPC limits eth_getLogs to 1000 blocks per query.
+      // Fetch the current block number and look back at most 900 blocks to stay safely within the limit.
+      const latestBlock = await queryProvider.getBlockNumber();
+      const fromBlock = Math.max(0, latestBlock - 900);
+
       // Topic hashes
       const procurementCreatedTopic = ethers.id("ProcurementCreated(uint256,address,string)");
       const evaluationStoredTopic = ethers.id("EvaluationStored(uint256,string,uint256)");
       const parsingCompletedTopic = ethers.id("ParsingCompleted(uint256,string)");
       const analysisCompletedTopic = ethers.id("AnalysisCompleted(uint256,string)");
 
-      // Fetch logs in parallel
+      // Fetch logs in parallel — scoped to last 900 blocks to respect RPC limits
       const [procurementLogs, evaluationLogs, parsingLogs, analysisLogs] = await Promise.all([
         queryProvider.getLogs({
           address: PROCUREMENT_STORAGE_ADDRESS,
           topics: [procurementCreatedTopic],
-          fromBlock: 0,
+          fromBlock,
           toBlock: "latest"
         }),
         queryProvider.getLogs({
           address: PROCUREMENT_STORAGE_ADDRESS,
           topics: [evaluationStoredTopic],
-          fromBlock: 0,
+          fromBlock,
           toBlock: "latest"
         }),
         queryProvider.getLogs({
           address: PARSE_WEBSITE_ADDRESS,
           topics: [parsingCompletedTopic],
-          fromBlock: 0,
+          fromBlock,
           toBlock: "latest"
         }),
         queryProvider.getLogs({
           address: AI_RECOMMENDATION_ADDRESS,
           topics: [analysisCompletedTopic],
-          fromBlock: 0,
+          fromBlock,
           toBlock: "latest"
         })
       ]);

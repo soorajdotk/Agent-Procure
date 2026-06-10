@@ -11,6 +11,9 @@ import {
   AI_RECOMMENDATION_ABI,
   SOMNIA_TESTNET_CONFIG
 } from "../contracts/config";
+
+console.log("PARSE_WEBSITE_ADDRESS:", PARSE_WEBSITE_ADDRESS);
+
 import {
   Globe,
   Sparkles,
@@ -79,6 +82,12 @@ export const RequestDetails: React.FC = () => {
     1: { status: "idle", parseRequestId: "", resultText: "", txHash: "" },
     2: { status: "idle", parseRequestId: "", resultText: "", txHash: "" }
   });
+  // Ref to always have fresh parsingStates inside async callbacks (avoids stale closure)
+  const parsingStatesRef = React.useRef<Record<number, ParsingState>>({
+    0: { status: "idle", parseRequestId: "", resultText: "", txHash: "" },
+    1: { status: "idle", parseRequestId: "", resultText: "", txHash: "" },
+    2: { status: "idle", parseRequestId: "", resultText: "", txHash: "" }
+  });
 
   // AI Recommendation state
   const [aiState, setAiState] = useState<AIState>({
@@ -116,8 +125,24 @@ export const RequestDetails: React.FC = () => {
     }
   }, [requestId]);
 
-  // Persist states to localStorage
+  // Persist states to localStorage — always merges a single index update safely
+  const updateParsingState = (index: number, partial: Partial<ParsingState>) => {
+    setParsingStates(prev => {
+      const next = {
+        ...prev,
+        [index]: { ...prev[index], ...partial }
+      };
+      parsingStatesRef.current = next;
+      if (requestId) {
+        localStorage.setItem(`procurement_parsing_${requestId}`, JSON.stringify(next));
+      }
+      return next;
+    });
+  };
+
+  // Keep ref in sync when state is loaded from localStorage
   const saveParsingStates = (states: Record<number, ParsingState>) => {
+    parsingStatesRef.current = states;
     setParsingStates(states);
     if (requestId) {
       localStorage.setItem(`procurement_parsing_${requestId}`, JSON.stringify(states));
@@ -190,21 +215,21 @@ export const RequestDetails: React.FC = () => {
     }
   }, [provider, fetchRequestData]);
 
-  // Website parsing logic
+  // Website parsing logic — uses updateParsingState to avoid stale closure overwrites
   const handleParseWebsite = async (urlIndex: number, url: string) => {
     if (!signer || !isConnected) {
       alert("Please connect your wallet first.");
       return;
     }
 
-    const updated = { ...parsingStates };
-    updated[urlIndex] = {
+    // Mark this specific URL as submitting (functional update — safe for concurrent calls)
+    updateParsingState(urlIndex, {
       status: "submitting",
       parseRequestId: "",
       resultText: "",
-      txHash: ""
-    };
-    saveParsingStates(updated);
+      txHash: "",
+      error: undefined
+    });
 
     try {
       const contract = new ethers.Contract(
@@ -213,17 +238,27 @@ export const RequestDetails: React.FC = () => {
         signer
       );
 
-      // We send 0.1 STT (10^17 wei) as transaction value based on estimated requirements
-      const valueToSend = ethers.parseEther("0.1");
+      // Use getRequiredDeposit() — now available on the new contract
+      let valueToSend: bigint;
+      try {
+        const deposit = await contract.getRequiredDeposit();
+        valueToSend = BigInt(deposit.toString());
+        console.log("[parseWebsite] getRequiredDeposit():", ethers.formatEther(valueToSend), "STT");
+      } catch {
+        // Fallback to confirmed working value from Remix testing
+        valueToSend = ethers.parseEther("3.3");
+        console.warn("[parseWebsite] getRequiredDeposit() failed, using 3.3 STT fallback");
+      }
+
+      console.log("Calling parseWebsite with:");
+      console.log("  Contract:", PARSE_WEBSITE_ADDRESS);
+      console.log("  URL:", url);
+      console.log("  Value:", ethers.formatEther(valueToSend), "STT");
 
       const tx = await contract.parseWebsite(url, { value: valueToSend });
-      
-      updated[urlIndex] = {
-        ...updated[urlIndex],
-        status: "parsing",
-        txHash: tx.hash
-      };
-      saveParsingStates(updated);
+
+      // Transaction submitted to mempool — update to "parsing"
+      updateParsingState(urlIndex, { status: "parsing", txHash: tx.hash });
 
       const receipt = await tx.wait();
       
@@ -235,7 +270,7 @@ export const RequestDetails: React.FC = () => {
             topics: log.topics as string[],
             data: log.data
           });
-          if (parsedLog && parsedLog.name === "ParsingRequested") {
+          if (parsedLog && parsedLog.name === "ParseRequested") {
             parseId = parsedLog.args.requestId.toString();
             break;
           }
@@ -245,65 +280,105 @@ export const RequestDetails: React.FC = () => {
       }
 
       if (!parseId) {
-        throw new Error("Could not parse agent request ID from logs.");
+        throw new Error("Could not extract parse request ID from transaction logs.");
       }
 
-      updated[urlIndex] = {
-        ...updated[urlIndex],
-        parseRequestId: parseId
-      };
-      saveParsingStates(updated);
+      updateParsingState(urlIndex, { parseRequestId: parseId });
 
     } catch (err: any) {
       console.error(err);
-      updated[urlIndex] = {
-        ...updated[urlIndex],
+      updateParsingState(urlIndex, {
         status: "failed",
         error: err.reason || err.message || "Failed to submit parsing request."
-      };
-      saveParsingStates(updated);
+      });
     }
   };
 
-  // Poll for parsing completion
+  // Watch for ParsingCompleted events + fallback pendingRequests polling
   useEffect(() => {
-    const activePollingUrls = Object.entries(parsingStates)
+    const activeItems = Object.entries(parsingStates)
       .filter(([_, state]) => state.status === "parsing" && state.parseRequestId)
       .map(([index, state]) => ({ index: Number(index), parseRequestId: state.parseRequestId }));
 
-    if (activePollingUrls.length === 0 || !provider) return;
+    if (activeItems.length === 0 || !provider) return;
 
-    const interval = setInterval(async () => {
+    // Watch for ParseCompleted / ParseFailed events + fallback results() polling
+    const checkCompletion = async () => {
       const contract = new ethers.Contract(
         PARSE_WEBSITE_ADDRESS,
         PARSE_WEBSITE_ABI,
         provider
       );
 
-      for (const { index, parseRequestId } of activePollingUrls) {
+      for (const { index, parseRequestId } of activeItems) {
+        // Skip already-completed slots (check ref for freshness)
+        if (parsingStatesRef.current[index]?.status === "completed") continue;
+
         try {
-          const isPending = await contract.pendingRequests(parseRequestId);
-          if (!isPending) {
-            // Completed!
-            const [resultText, completed] = await contract.getParsedResult(parseRequestId);
-            
-            // Check contract completed status
-            if (completed || resultText) {
-              const updated = { ...parsingStates };
-              updated[index] = {
-                ...updated[index],
-                status: "completed",
-                resultText: resultText || "Parsing completed but returned empty text."
-              };
-              saveParsingStates(updated);
-            }
+          const parseIdBN = BigInt(parseRequestId);
+
+          // Strategy 1: Check ParseCompleted event logs for this requestId
+          // Limit to last 900 blocks to stay within Somnia testnet RPC limit (max 1000 blocks)
+          const latestBlock = await provider.getBlockNumber();
+          const fromBlock = Math.max(0, latestBlock - 900);
+
+          // Check ParseCompleted
+          const completedFilter = contract.filters.ParseCompleted(parseIdBN);
+          const completedLogs = await contract.queryFilter(completedFilter, fromBlock, "latest");
+
+          if (completedLogs.length > 0) {
+            const eventLog = completedLogs[0] as any;
+            const resultFromEvent = eventLog.args?.result || eventLog.args?.[1] || "";
+            updateParsingState(index, {
+              status: "completed",
+              resultText: resultFromEvent || "Parsing completed (no text returned)."
+            });
+            continue;
           }
+
+          // Check ParseFailed
+          const failedFilter = contract.filters.ParseFailed(parseIdBN);
+          const failedLogs = await contract.queryFilter(failedFilter, fromBlock, "latest");
+
+          if (failedLogs.length > 0) {
+            const failedLog = failedLogs[0] as any;
+            const failStatus = failedLog.args?.status ?? "unknown";
+            updateParsingState(index, {
+              status: "failed",
+              error: `Agent returned ParseFailed (status code: ${failStatus}). Try re-parsing.`
+            });
+            continue;
+          }
+
+          // Strategy 2: Check results() mapping directly
+          const resultData = await contract.results(parseRequestId);
+          if (resultData.completed || resultData[2]) {
+            const extractedData = resultData.result || resultData[1] || "";
+            updateParsingState(index, {
+              status: "completed",
+              resultText: extractedData || "Parsing completed (no text returned)."
+            });
+            continue;
+          }
+
+          // Strategy 3: Fallback — getResult()
+          const [resultText, completed] = await contract.getResult(parseRequestId);
+          if (completed || resultText) {
+            updateParsingState(index, {
+              status: "completed",
+              resultText: resultText || "Parsing completed (no text returned)."
+            });
+          }
+
         } catch (err) {
-          console.error(`Error polling parse status for id ${parseRequestId}:`, err);
+          console.error(`Error checking parse status for id ${parseRequestId}:`, err);
         }
       }
-    }, 10000); // Poll every 10 seconds
+    };
 
+    // Run immediately, then every 8 seconds
+    checkCompletion();
+    const interval = setInterval(checkCompletion, 8000);
     return () => clearInterval(interval);
   }, [parsingStates, provider]);
 
@@ -531,6 +606,14 @@ Reason:`;
     }));
   };
 
+  // Manual force-complete for a specific URL if agent is confirmed done but event was missed
+  const handleManualComplete = (urlIndex: number) => {
+    updateParsingState(urlIndex, {
+      status: "completed",
+      resultText: `Parse request #${parsingStates[urlIndex]?.parseRequestId} confirmed. Agent completed on-chain (manually acknowledged).`
+    });
+  };
+
   if (loadingRequest) {
     return (
       <div className="flex h-[60vh] flex-col items-center justify-center space-y-4">
@@ -557,9 +640,11 @@ Reason:`;
     );
   }
 
-  const allUrlsParsed = Object.values(parsingStates).every(
-    (state) => state.status === "completed"
-  );
+  // LLM button appears when all VENDOR URLs have been either completed or at least all triggered
+  // Require at minimum: all parsing states are NOT idle and NOT submitting
+  const completedCount = Object.values(parsingStates).filter(s => s.status === "completed").length;
+  const allUrlsParsed = vendorUrls.length > 0 && completedCount === vendorUrls.length;
+  const anyParsing = Object.values(parsingStates).some(s => s.status === "parsing" || s.status === "submitting");
 
   return (
     <div className="space-y-8">
@@ -614,12 +699,26 @@ Reason:`;
 
           {/* PAGE 3: WEBSITE PARSING SECTION */}
           <div className="glass-panel rounded-3xl p-6">
-            <h2 className="text-lg font-bold text-white flex items-center space-x-2 mb-4">
-              <Globe className="h-5 w-5 text-brandCyan" />
-              <span>Step 1: Website Scraping & Parsing</span>
-            </h2>
-            <p className="text-xs text-gray-400 mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-white flex items-center space-x-2">
+                <Globe className="h-5 w-5 text-brandCyan" />
+                <span>Step 1: Website Scraping & Parsing</span>
+              </h2>
+              <span className={`text-xs font-bold px-3 py-1 rounded-full border ${
+                allUrlsParsed
+                  ? "bg-green-500/10 text-green-400 border-green-500/20"
+                  : anyParsing
+                    ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/20"
+                    : "bg-white/5 text-gray-400 border-white/10"
+              }`}>
+                {completedCount}/{vendorUrls.length} Parsed
+              </span>
+            </div>
+            <p className="text-xs text-gray-400 mb-1">
               Somnia website agent parses the vendor pages. Requires sending a deposit of 0.1 STT per site.
+            </p>
+            <p className="text-[10px] text-gray-600 mb-6">
+              If parsing stays yellow for &gt;2 min, verify on the block explorer then click <span className="text-yellow-400">"Agent finished? Mark complete"</span>.
             </p>
 
             <div className="space-y-4">
@@ -636,14 +735,14 @@ Reason:`;
                         </a>
                       </div>
                       
-                      <div className="flex items-center gap-3">
+                      <div className="flex flex-col items-end gap-2">
                         {parseState.status === "idle" && (
                           <button
                             onClick={() => handleParseWebsite(index, url)}
                             disabled={!isConnected}
                             className="text-xs px-4 py-2 rounded-xl bg-brandCyan/10 hover:bg-brandCyan/20 text-brandCyan font-semibold border border-brandCyan/20 transition-all"
                           >
-                            Parse Website (0.1 STT)
+                            Parse Website (3.3 STT)
                           </button>
                         )}
                         {parseState.status === "submitting" && (
@@ -653,21 +752,64 @@ Reason:`;
                           </div>
                         )}
                         {parseState.status === "parsing" && (
-                          <div className="flex items-center space-x-2 text-xs text-yellow-400 bg-yellow-500/5 px-3 py-1.5 rounded-lg border border-yellow-500/15">
-                            <Clock className="h-4 w-4 animate-pulse" />
-                            <span>Parsing On-Chain... (ID #{parseState.parseRequestId})</span>
+                          <div className="flex flex-col items-end gap-2">
+                            <div className="flex items-center space-x-2 text-xs text-yellow-400 bg-yellow-500/5 px-3 py-1.5 rounded-lg border border-yellow-500/15">
+                              <Clock className="h-4 w-4 animate-pulse" />
+                              <span>Parsing On-Chain... (ID #{parseState.parseRequestId})</span>
+                            </div>
+                            {/* Manual override: if agent is done on-chain but event wasn't caught */}
+                            <button
+                              onClick={() => handleManualComplete(index)}
+                              className="text-[10px] px-3 py-1 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-300 border border-yellow-500/20 transition-all"
+                              title="Use this if you confirmed the transaction completed on-chain but the UI hasn't updated"
+                            >
+                              ✓ Agent finished? Mark complete
+                            </button>
                           </div>
                         )}
                         {parseState.status === "completed" && (
-                          <div className="flex items-center space-x-1 text-xs text-green-400 bg-green-500/5 px-3 py-1.5 rounded-lg border border-green-500/15">
-                            <CheckCircle className="h-4 w-4" />
-                            <span>Parsed & Stored</span>
+                          <div className="flex flex-col items-end gap-1.5">
+                            <div className="flex items-center space-x-1 text-xs text-green-400 bg-green-500/5 px-3 py-1.5 rounded-lg border border-green-500/15">
+                              <CheckCircle className="h-4 w-4" />
+                              <span>Parsed & Stored</span>
+                            </div>
+                            {parseState.parseRequestId && (
+                              <div className="flex items-center space-x-1.5 text-[10px] text-gray-500 font-mono bg-white/[0.03] px-2.5 py-1 rounded-lg border border-white/5">
+                                <span className="text-gray-600">Agent ID:</span>
+                                <span className="text-brandCyan font-bold">#{parseState.parseRequestId}</span>
+                              </div>
+                            )}
+                            {parseState.txHash && (
+                              <a
+                                href={`https://shannon-explorer.somnia.network/tx/${parseState.txHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center space-x-1 text-[10px] text-gray-500 hover:text-brandCyan transition-colors font-mono"
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                                <span>{parseState.txHash.substring(0, 10)}...{parseState.txHash.slice(-6)}</span>
+                              </a>
+                            )}
+                            <button
+                              onClick={() => updateParsingState(index, { status: "idle", parseRequestId: "", resultText: "", txHash: "", error: undefined })}
+                              className="text-[10px] px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-500 hover:text-gray-300 border border-white/5 transition-all"
+                            >
+                              ↺ Reset
+                            </button>
                           </div>
                         )}
                         {parseState.status === "failed" && (
-                          <div className="flex items-center space-x-1 text-xs text-red-400 bg-red-500/5 px-3 py-1.5 rounded-lg border border-red-500/15">
-                            <AlertCircle className="h-4 w-4" />
-                            <span>Failed</span>
+                          <div className="flex flex-col items-end gap-2">
+                            <div className="flex items-center space-x-1 text-xs text-red-400 bg-red-500/5 px-3 py-1.5 rounded-lg border border-red-500/15">
+                              <AlertCircle className="h-4 w-4" />
+                              <span>Failed</span>
+                            </div>
+                            <button
+                              onClick={() => handleParseWebsite(index, url)}
+                              className="text-[10px] px-3 py-1 rounded-lg bg-brandCyan/10 hover:bg-brandCyan/20 text-brandCyan border border-brandCyan/20 transition-all"
+                            >
+                              Retry Parse
+                            </button>
                           </div>
                         )}
                       </div>
